@@ -183,7 +183,9 @@ class ResNetBlock(flax.nnx.Module):
 
 class ResNet(flax.nnx.Module):
     def __init__(self, rngs, image_height, image_width, image_channels, num_classes,
-        kernel_size=3, initial_kernel_size=7, start_channels=64, block_sizes=(3, 4, 6, 3), num_conv_layers_per_block=2, dropout_rate=0.2
+        kernel_size=3, initial_kernel_size=7, start_channels=64, block_sizes=(3, 4, 6, 3), 
+        hidden_dim=1024,
+        num_conv_layers_per_block=2, dropout_rate=0.2
     ):
         self.image_height = image_height
         self.image_width = image_width
@@ -213,7 +215,7 @@ class ResNet(flax.nnx.Module):
 
         self.output_channels = start_channels * 2**len(block_sizes)
 
-        self.fc = flax.nnx.Linear(self.output_channels, num_classes, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO)
+        self.fc = MLP(rngs, self.output_channels, hidden_dim, num_classes, dropout_rate=dropout_rate)
 
     def __call__(self, x, *, rngs):
         x = x.reshape(x.shape[0], self.image_height, self.image_width, self.image_channels)
@@ -223,7 +225,7 @@ class ResNet(flax.nnx.Module):
 
         x = self.blocks(x, rngs=rngs)
         x = x.reshape(x.shape[0], -1, self.output_channels).mean(axis=1)
-        x = self.fc(x)
+        x = self.fc(x, rngs=rngs)
         return x
 
 
