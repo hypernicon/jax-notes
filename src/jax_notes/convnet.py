@@ -393,6 +393,7 @@ def flax_convent_loss(conv_net, rngs, batch):
     ).mean()
     return loss, logits
 
+FLAX_PASS_MODEL_TO_OPTIMIZER = tuple([int(x) for x in flax.__version__.split(".")[:2]]) >= (0, 11)
 
 @flax.nnx.jit
 def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch):
@@ -401,7 +402,10 @@ def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch):
     grad_fn = flax.nnx.value_and_grad(flax_convent_loss, has_aux=True)
     (loss, logits), grads = grad_fn(conv_net, rngs, batch)
     metrics.update(loss=loss, logits=logits, labels=labels)  # In-place updates.
-    optimizer.update(conv_net, grads)  # In-place updates.
+    if FLAX_PASS_MODEL_TO_OPTIMIZER:
+        optimizer.update(conv_net, grads)  # In-place updates.
+    else:
+        optimizer.update(grads)  # In-place updates.
 
 
 @flax.nnx.jit
@@ -495,9 +499,6 @@ if __name__ == "__main__":
     for step in range(train_steps):
         key, key_subsample = jax.random.split(key)
         indices = jax.random.randint(key_subsample, (batch_size,), 0, train_images.shape[0])
-        # if image_channels > 1:
-        #     images = train_images[indices]
-        # else:
         key, images = augment(key, train_images[indices])
         batch = (images, train_labels[indices])
         # Run the optimization for one step and make a stateful update to the following:
