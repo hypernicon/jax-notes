@@ -165,7 +165,7 @@ class ResNetSubBlock(flax.nnx.Module):
 
 
 class ResNetBlock(flax.nnx.Module):
-    def __init__(self, rngs, channels, kernel_size=3, num_conv_blocks=3, num_conv_layers_per_block=2, dropout_rate=0.2):
+    def __init__(self, rngs, channels, kernel_size=3, num_conv_blocks=3, num_conv_layers_per_block=2, dropout_rate=0.2, use_first_block=True):
         self.channels = channels
         self.kernel_size = kernel_size
         self.num_conv_blocks = num_conv_blocks
@@ -173,9 +173,12 @@ class ResNetBlock(flax.nnx.Module):
         self.dropout_rate = dropout_rate
 
         self.conv_layers = flax.nnx.Sequential(*[
-            ResNetSubBlock(rngs, channels, kernel_size, num_conv_layers_per_block, dropout_rate, is_first_block=j==0)
+            ResNetSubBlock(rngs, channels, kernel_size, num_conv_layers_per_block, dropout_rate, is_first_block=(use_first_block and j==0))
             for j in range(num_conv_blocks)
         ])
+
+    def __call__(self, x, *, rngs):
+        return self.conv_layers(x, rngs=rngs)
 
 
 class ResNet(flax.nnx.Module):
@@ -201,7 +204,10 @@ class ResNet(flax.nnx.Module):
         self.initial_dropout = flax.nnx.Dropout(dropout_rate)
 
         self.blocks = flax.nnx.Sequential(*[
-            ResNetBlock(rngs, start_channels * 2**i, kernel_size, num_conv_blocks, num_conv_layers_per_block, dropout_rate)
+            ResNetBlock(
+                rngs, start_channels * 2**i, kernel_size, num_conv_blocks, 
+                num_conv_layers_per_block, dropout_rate, use_first_block= i != 0
+            )
             for i, num_conv_blocks in enumerate(block_sizes)
         ])
 
