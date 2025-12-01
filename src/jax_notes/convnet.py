@@ -261,29 +261,24 @@ def augment(
     return key, out
 
 
-
-def compute_whitening_params(images, eps=1e-6):
+def compute_whitening_params(images, eps=1e-1):
     images = images.reshape(images.shape[0], -1)
     mean = jnp.mean(images, axis=0)
-    cov = jnp.cov(images, rowvar=False) # + lmbda * jnp.eye(images.shape[1]) # add a ridge for numerical stability
+    centered = images - mean
+    cov = (centered.T @ centered) / images.shape[0]
 
     # now prevent small eigenvalues from causing numerical issues when inverting via solve_triangular below
     eigvals, eigvecs = jnp.linalg.eigh(cov)
     eigvals_clamped = jnp.maximum(eigvals, eps)
-    W = eigvecs @ jnp.diag(1.0 / jnp.sqrt(eigvals_clamped)) @ eigvecs.T
-
-    # finally, compute the square root of the covariance matrix
-    cov_sqrt = jnp.linalg.cholesky(W)
-    return mean, cov_sqrt
+    cov_sqrt_inv = eigvecs @ jnp.diag(1.0 / jnp.sqrt(eigvals_clamped)) @ eigvecs.T
+    return mean, cov_sqrt_inv
 
 
 @jax.jit
-def whiten(image, mean, cov_sqrt):
+def whiten(image, mean, cov_sqrt_inv):
     image_flat = image.reshape(image.shape[0], -1)
     image_flat_centered = image_flat - mean
-    # solve the linear system cov_sqrt @ x = image_flat_centered
-    image_flat_std = jax.scipy.linalg.solve_triangular(cov_sqrt, image_flat_centered.T, lower=True).T
-    return image_flat_std.reshape(image.shape)
+    return (image_flat_centered @ cov_sqrt_inv).reshape(image.shape)
 
 
 def prepare_mnist(key):
