@@ -18,19 +18,21 @@ BIAS_ZERO = flax.nnx.initializers.zeros
 
 class ConvSubblock(flax.nnx.Module):
     def __init__(self, rngs, channels_in, channels_out,
-                kernel_size=3, pool_stride=2, num_conv_layers=1, dropout_rate=0.2):
+                kernel_size=3, pool_stride=2, num_conv_layers=1, dropout_rate=0.2, apply_relu=True, conv_stride=(1, 1)):
         self.conv = flax.nnx.Conv(
             channels_in, channels_out, (kernel_size, kernel_size), rngs=rngs, padding="SAME", 
-            kernel_init=KAIMING, bias_init=BIAS_ZERO
+            kernel_init=KAIMING, bias_init=BIAS_ZERO, strides=conv_stride
         )
         self.bnorm = flax.nnx.BatchNorm(channels_out, rngs=rngs)
         self.dropout = flax.nnx.Dropout(dropout_rate)
+        self.apply_relu = apply_relu
 
     def __call__(self, x, *, rngs):
         x = self.conv(x)
         x = self.bnorm(x)
         x = self.dropout(x, rngs=rngs)
-        x = flax.nnx.relu(x)
+        if self.apply_relu:
+            x = flax.nnx.relu(x)
         return x
 
 
@@ -124,9 +126,97 @@ class ConvNet(flax.nnx.Module):
         return x
 
 
-import jax
-import jax.numpy as jnp
-from jax.scipy.ndimage import map_coordinates
+class ResNetSubBlock(flax.nnx.Module):
+    def __init__(self, rngs, channels, kernel_size=3, num_conv_layers=2, dropout_rate=0.2, is_first_block=False):
+        conv_layers = []
+        channels_in = channels // 2 if is_first_block else channels
+        stride = (2, 2) if is_first_block else (1, 1)
+        for i in range(num_conv_layers):
+            apply_relu = i < num_conv_layers - 1
+            conv_layers.append(
+                ConvSubblock(
+                    rngs, channels_in, channels, kernel_size, num_conv_layers, dropout_rate, 
+                    apply_relu=apply_relu, conv_stride=stride
+                )
+            )
+            channels_in = channels
+            stride = (1, 1)
+
+        if is_first_block:
+            self.shortcut = flax.nnx.Conv(
+                channels//2, channels, (1, 1), rngs=rngs, padding="SAME",
+                kernel_init=KAIMING, bias_init=BIAS_ZERO, strides=(2, 2)
+            )
+        else:  
+            self.shortcut = None
+
+        self.conv_layers = flax.nnx.Sequential(*conv_layers)
+        self.is_first_block = is_first_block
+    
+    def __call__(self, x, *, rngs):
+        y = self.conv_layers(x, rngs=rngs)
+
+        if self.is_first_block:
+            z = self.shortcut(x)
+        else:
+            z = x
+
+        return flax.nnx.relu(y + z)
+
+
+class ResNetBlock(flax.nnx.Module):
+    def __init__(self, rngs, channels, kernel_size=3, num_conv_blocks=3, num_conv_layers_per_block=2, dropout_rate=0.2):
+        self.channels = channels
+        self.kernel_size = kernel_size
+        self.num_conv_blocks = num_conv_blocks
+        self.num_conv_layers_per_block = num_conv_layers_per_block
+        self.dropout_rate = dropout_rate
+
+        self.conv_layers = flax.nnx.Sequential(*[
+            ResNetSubBlock(rngs, channels, kernel_size, num_conv_layers_per_block, dropout_rate, is_first_block=j==0)
+            for j in range(num_conv_blocks)
+        ])
+
+
+class ResNet(flax.nnx.Module):
+    def __init__(self, rngs, image_height, image_width, image_channels, num_classes,
+        kernel_size=3, initial_kernel_size=7, start_channels=64, block_sizes=(3, 4, 6, 3), num_conv_layers_per_block=2, dropout_rate=0.2
+    ):
+        self.image_height = image_height
+        self.image_width = image_width
+        self.image_channels = image_channels
+        self.num_classes = num_classes
+        self.kernel_size = kernel_size
+        self.initial_kernel_size = initial_kernel_size
+        self.start_channels = start_channels
+        self.block_sizes = block_sizes
+        self.num_conv_layers_per_block = num_conv_layers_per_block
+        self.dropout_rate = dropout_rate
+
+        self.initial_conv = flax.nnx.Conv(
+            image_channels, start_channels, (initial_kernel_size, initial_kernel_size), rngs=rngs, padding="SAME",
+            kernel_init=KAIMING, bias_init=BIAS_ZERO, strides=(2, 2)
+        )
+        self.initial_bnorm = flax.nnx.BatchNorm(start_channels, rngs=rngs)
+        self.initial_dropout = flax.nnx.Dropout(dropout_rate)
+
+        self.blocks = flax.nnx.Sequential(*[
+            ResNetBlock(rngs, start_channels * 2**i, kernel_size, num_conv_blocks, num_conv_layers_per_block, dropout_rate)
+            for i, num_conv_blocks in enumerate(block_sizes)
+        ])
+
+        self.global_avg_pool = flax.nnx.GlobalAveragePool()
+        self.fc = flax.nnx.Linear(start_channels * 2**len(block_sizes), num_classes, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO)
+
+    def __call__(self, x, *, rngs):
+        x = self.initial_conv(x)
+        x = self.initial_bnorm(x)
+        x = self.initial_dropout(x, rngs=rngs)
+
+        x = self.blocks(x, rngs=rngs)
+        x = self.global_avg_pool(x)
+        x = self.fc(x)
+        return x
 
 
 def _affine_warp_2d(img, angle_deg, tx, ty, scale, shear_x, shear_y):
@@ -404,7 +494,9 @@ def flax_convent_loss(conv_net, rngs, batch):
     ).mean()
     return loss, logits
 
+
 FLAX_PASS_MODEL_TO_OPTIMIZER = tuple([int(x) for x in flax.__version__.split(".")[:2]]) >= (0, 11)
+
 
 @flax.nnx.jit
 def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch, key):
@@ -431,12 +523,14 @@ def flax_convnet_eval_step(conv_net, metrics, rngs, batch):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="mnist")
+    parser.add_argument("--model", type=str, default="convnet")
     parser.add_argument("--train-steps", type=int, default=32000)
     parser.add_argument("--eval-every", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=0.005)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--block-sizes", type=str, default="3,4,6,3")
     parser.add_argument("--num-conv-blocks", type=int, default=3)
     parser.add_argument("--num-conv-layers-per-block", type=int, default=2)
     parser.add_argument("--hidden-dim", type=int, default=256)
@@ -459,18 +553,31 @@ if __name__ == "__main__":
     key, train_images, test_images, train_labels, test_labels, image_height, image_width, image_channels, num_classes = prepare_fn(key)
 
     rngs = flax.nnx.Rngs(42)
-    conv_net = ConvNet(
-        rngs, 
-        image_height,
-        image_width,
-        image_channels,
-        num_classes,
-        num_conv_blocks=args.num_conv_blocks, 
-        num_conv_layers_per_block=args.num_conv_layers_per_block, 
-        hidden_dim=args.hidden_dim, 
-        channel_multiplier=args.channel_multiplier, 
-        dropout_rate=args.dropout_rate
-    )
+    if args.model == "convnet":
+        conv_net = ConvNet(
+            rngs, 
+            image_height,
+            image_width,
+            image_channels,
+            num_classes,
+            num_conv_blocks=args.num_conv_blocks, 
+            num_conv_layers_per_block=args.num_conv_layers_per_block, 
+            hidden_dim=args.hidden_dim, 
+            channel_multiplier=args.channel_multiplier, 
+            dropout_rate=args.dropout_rate
+        )
+    
+    elif args.model == "resnet":
+        conv_net = ResNet(
+            rngs,
+            image_height,
+            image_width,
+            image_channels,
+            num_classes,
+            block_sizes=[int(x) for x in args.block_sizes.split(",")],
+            num_conv_layers_per_block=args.num_conv_layers_per_block,
+            dropout_rate=args.dropout_rate
+        )
         
     flax.nnx.display(conv_net)
 
