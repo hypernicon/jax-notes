@@ -1,0 +1,79 @@
+name: MyST GitHub Pages Deploy
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  BASE_URL: /${{ github.event.repository.name }}   # => /jax-notes
+
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Debug workspace tree
+        run: |
+          echo "workspace: $GITHUB_WORKSPACE"
+          pwd
+          ls -la
+          echo "Try listing notebook/:"
+          ls -la notebook || true
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Install MyST
+        run: npm install -g mystmd
+
+      # Build the site from the subfolder
+      - name: Build site
+        working-directory: notebook
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          echo "BASE_URL=$BASE_URL"
+          myst build --html
+
+      # Debug: show where the build actually went
+      - name: Show build output
+        working-directory: notebook
+        run: |
+          echo "PWD=$(pwd)"
+          echo "Tree under notebook/:"
+          ls -la
+          echo "Tree under notebook/_build:"
+          ls -la _build || true
+          echo "Tree under notebook/_build/html:"
+          ls -la _build/html || true
+          echo "Tree under notebook/_build/site:"
+          ls -la _build/site || true
+          echo "Tree under notebook/_build/site/public:"
+          ls -la _build/site/public || true
+
+      # Upload the correct folder. If your MyST writes to _build/site, change the path below.
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: notebook/_build/html
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

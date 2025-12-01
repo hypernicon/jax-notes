@@ -75,7 +75,7 @@ class MLP(flax.nnx.Module):
 
 class ConvNet(flax.nnx.Module):
     def __init__(
-        self, rngs, image_height, image_width, num_classes, num_conv_blocks=3, 
+        self, rngs, image_height, image_width, image_channels, num_classes, num_conv_blocks=3, 
         num_conv_layers_per_block=2, hidden_dim=256, channel_multiplier=4, dropout_rate=0.2
     ):
         self.hidden_dim = hidden_dim
@@ -84,9 +84,10 @@ class ConvNet(flax.nnx.Module):
 
         self.image_height = image_height
         self.image_width = image_width
+        self.image_channels = image_channels
         self.num_classes = num_classes
 
-        channel_sizes = [channel_multiplier**i for i in range(num_conv_blocks)]
+        channel_sizes = [image_channels * (channel_multiplier**i) for i in range(num_conv_blocks)]
 
         self.conv_layers = flax.nnx.Sequential(*[
             ConvLayer(rngs, c, c*channel_multiplier, num_conv_layers=num_conv_layers_per_block, dropout_rate=dropout_rate)
@@ -106,27 +107,20 @@ class ConvNet(flax.nnx.Module):
         self.mlp = MLP(rngs, mlp_dim, hidden_dim, self.num_classes, dropout_rate)
     
     def __call__(self, x, *, rngs):
-        x = x.reshape(x.shape[0], self.image_height, self.image_width, 1)
+        x = x.reshape(x.shape[0], self.image_height, self.image_width, self.image_channels)
         x = self.conv_layers(x, rngs=rngs)
         x = self.mlp(x, rngs=rngs)
         return x
 
 
-def affine_warp_image(
-    img,
-    angle_deg,
-    tx,
-    ty,
-    scale,
-    shear_x,
-    shear_y,
-):
+import jax
+import jax.numpy as jnp
+from jax.scipy.ndimage import map_coordinates
+
+
+def _affine_warp_2d(img, angle_deg, tx, ty, scale, shear_x, shear_y):
     """
-    img: (H, W)
-    angle_deg: scalar angle in degrees
-    tx, ty: translations (float, in pixels)
-    scale: isotropic scale factor (e.g. 1.0 = no scale)
-    shear_x, shear_y: shear factors
+    img: (H, W), single channel
     """
     H, W = img.shape
     angle = jnp.deg2rad(angle_deg)
@@ -172,7 +166,6 @@ def affine_warp_image(
     # map_coordinates expects coords ordered as (axis0, axis1) = (y, x)
     sample_coords = jnp.stack([ys_t, xs_t], axis=0)  # (2, H, W)
 
-    # Bilinear sampling, fill outside with 0
     warped = map_coordinates(
         img,
         sample_coords,
@@ -183,9 +176,39 @@ def affine_warp_image(
     return warped
 
 
+def affine_warp_image(
+    img,
+    angle_deg,
+    tx,
+    ty,
+    scale,
+    shear_x,
+    shear_y,
+):
+    """
+    img: (H, W)        for grayscale
+         (H, W, C)     for NHWC color (e.g. CIFAR-10)
+    """
+    if img.ndim == 2:
+        # single-channel
+        return _affine_warp_2d(img, angle_deg, tx, ty, scale, shear_x, shear_y)
+    elif img.ndim == 3:
+        H, W, C = img.shape
+
+        # vmap the 2D warp over the channel axis
+        def warp_one_channel(ch):
+            return _affine_warp_2d(ch, angle_deg, tx, ty, scale, shear_x, shear_y)
+
+        # in_axes=2: iterate over last axis (C), out_axes=2: put channels back in last axis
+        warped = jax.vmap(warp_one_channel, in_axes=2, out_axes=2)(img)
+        return warped
+    else:
+        raise ValueError(f"Expected img.ndim 2 or 3, got {img.ndim}")
+
+
 def augment(
     key,
-    images,                      # (B, H, W)
+    images,                      # (B, H, W) or (B, H, W, C)
     percent_augmented=0.5,
     max_translation=2.0,         # in pixels
     max_rotation_deg=15.0,
@@ -196,11 +219,18 @@ def augment(
     Apply random affine transforms (rotation, translation, scale, shear)
     to ~percent_augmented of the batch.
 
-    images: (B, H, W), float32 (e.g. whitened MNIST)
+    images: (B, H, W)      e.g. MNIST
+            (B, H, W, C)   e.g. CIFAR-10 NHWC
     returns: (key_out, images_out)
     """
-    assert images.ndim == 3, "augment assumes images of shape (B, H, W)"
-    B, H, W = images.shape
+    if images.ndim == 3:
+        B, H, W = images.shape
+        has_channels = False
+    elif images.ndim == 4:
+        B, H, W, C = images.shape
+        has_channels = True
+    else:
+        raise ValueError(f"augment expects images of shape (B,H,W) or (B,H,W,C), got {images.shape}")
 
     # Split keys for different random draws
     key, key_mask, key_tx, key_ty, key_rot, key_scale, key_shear = jax.random.split(key, 7)
@@ -252,13 +282,18 @@ def augment(
     batch_warp = jax.vmap(affine_warp_image)
     augmented = batch_warp(
         images, angles, tx, ty, scales, shear_x, shear_y
-    )  # (B, H, W)
+    )
 
     # Mix original and augmented according to mask
-    mask = do_aug[:, None, None]  # (B, 1, 1)
+    if has_channels:
+        mask = do_aug[:, None, None, None]  # (B, 1, 1, 1)
+    else:
+        mask = do_aug[:, None, None]        # (B, 1, 1)
+
     out = jnp.where(mask, augmented, images)
 
     return key, out
+
 
 
 def compute_whitening_params(images, eps=1e-1):
@@ -291,7 +326,7 @@ def prepare_mnist(key):
     print(f"MNIST Train images shape: {train_images_jnp.shape} -- max: {jnp.max(train_images_jnp)}, min: {jnp.min(train_images_jnp)}")
 
     key, key_subsample = jax.random.split(key)
-    image_subsample = jax.random.choice(key, train_images_jnp, shape=(10_000,), replace=False)
+    image_subsample = jax.random.choice(key_subsample, train_images_jnp, shape=(10_000,), replace=False)
     print(f"MNIST Image subsample shape: {image_subsample.shape} -- max: {jnp.max(image_subsample)}, min: {jnp.min(image_subsample)}")
 
     train_mean, train_cov_sqrt = compute_whitening_params(image_subsample)
@@ -312,7 +347,42 @@ def prepare_mnist(key):
 
     print(f"MNIST train labels shape: {train_labels.shape}, test labels shape: {test_labels.shape}")
 
-    return key, whitened_train, whitened_test, train_labels, test_labels, 28, 28, 10
+    return key, whitened_train, whitened_test, train_labels, test_labels, 28, 28, 1, 10
+
+
+def prepare_cifar10(key):
+    cifar10 = load_dataset("uoft-cs/cifar10")
+
+    train_ds = cifar10["train"]
+    test_ds = cifar10["test"]
+
+    train_images_jnp = jnp.array(train_ds["img"]).astype(jnp.float32) / 255.0
+    print(f"CIFAR-10 Train images shape: {train_images_jnp.shape} -- max: {jnp.max(train_images_jnp)}, min: {jnp.min(train_images_jnp)}")
+    
+    key, key_subsample = jax.random.split(key)
+    image_subsample = jax.random.choice(key_subsample, train_images_jnp, shape=(10_000,), replace=False)
+    print(f"CIFAR-10 Image subsample shape: {image_subsample.shape} -- max: {jnp.max(image_subsample)}, min: {jnp.min(image_subsample)}")
+
+    train_mean, train_cov_sqrt = compute_whitening_params(image_subsample)
+    print(f"CIFAR-10 mean shape: {train_mean.shape} -- min: {jnp.min(train_mean)}, max: {jnp.max(train_mean)}")
+    print(f"CIFAR-10 cov_sqrt shape: {train_cov_sqrt.shape} -- min: {jnp.min(train_cov_sqrt)}, max: {jnp.max(train_cov_sqrt)}")
+    
+    test_images_jnp = jnp.array(test_ds["img"]).astype(jnp.float32) / 255.0
+    whitened_train = whiten(train_images_jnp, train_mean, train_cov_sqrt)
+    whitened_test = whiten(test_images_jnp, train_mean, train_cov_sqrt)
+
+    print("CIFAR-10 training data shape:", whitened_train.shape, "test data shape:", whitened_test.shape)
+    print(f"CIFAR-10 whitened train min: {jnp.min(whitened_train)}, max: {jnp.max(whitened_train)}")
+    print(f"CIFAR-10 whitened test min: {jnp.min(whitened_test)}, max: {jnp.max(whitened_test)}")
+    
+    # let's convert the labels to one-hot encoding
+    train_labels = jnp.array(train_ds["label"])
+    test_labels = jnp.array(test_ds["label"])
+
+    print(f"CIFAR-10 train labels shape: {train_labels.shape}, test labels shape: {test_labels.shape}")
+
+    return key, whitened_train, whitened_test, train_labels, test_labels, 32, 32, 3, 10
+
 
 
 def flax_convent_loss(conv_net, rngs, batch):
@@ -331,7 +401,7 @@ def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch):
     grad_fn = flax.nnx.value_and_grad(flax_convent_loss, has_aux=True)
     (loss, logits), grads = grad_fn(conv_net, rngs, batch)
     metrics.update(loss=loss, logits=logits, labels=labels)  # In-place updates.
-    optimizer.update(grads)  # In-place updates.
+    optimizer.update(conv_net, grads)  # In-place updates.
 
 
 @flax.nnx.jit
@@ -343,6 +413,7 @@ def flax_convnet_eval_step(conv_net, metrics, rngs, batch):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="mnist")
     parser.add_argument("--train-steps", type=int, default=32000)
     parser.add_argument("--eval-every", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -362,13 +433,20 @@ if __name__ == "__main__":
     args = parse_args()
     key = jax.random.key(args.seed)
 
-    key, train_images, test_images, train_labels, test_labels, image_height, image_width, num_classes = prepare_mnist(key)
+    prepare_fn = prepare_mnist
+    if args.dataset == "cifar10":
+        prepare_fn = prepare_cifar10
+    elif args.dataset != "mnist":
+        raise ValueError(f"Invalid dataset: {args.dataset}")
+
+    key, train_images, test_images, train_labels, test_labels, image_height, image_width, image_channels, num_classes = prepare_fn(key)
 
     rngs = flax.nnx.Rngs(42)
     conv_net = ConvNet(
         rngs, 
         image_height,
         image_width,
+        image_channels,
         num_classes,
         num_conv_blocks=args.num_conv_blocks, 
         num_conv_layers_per_block=args.num_conv_layers_per_block, 
@@ -379,12 +457,18 @@ if __name__ == "__main__":
         
     flax.nnx.display(conv_net)
 
-    learning_rate = 0.005
+    learning_rate = args.learning_rate
     momentum = 0.9
+
+    schedule = optax.exponential_decay(
+        init_value=learning_rate,
+        transition_steps=1000,
+        decay_rate=0.99,
+    )
 
     optimizer = flax.nnx.Optimizer(
         conv_net, 
-        optax.adamw(args.learning_rate, args.momentum), 
+        optax.adamw(schedule, args.momentum), 
         wrt=flax.nnx.Param
     )
 
@@ -411,6 +495,9 @@ if __name__ == "__main__":
     for step in range(train_steps):
         key, key_subsample = jax.random.split(key)
         indices = jax.random.randint(key_subsample, (batch_size,), 0, train_images.shape[0])
+        # if image_channels > 1:
+        #     images = train_images[indices]
+        # else:
         key, images = augment(key, train_images[indices])
         batch = (images, train_labels[indices])
         # Run the optimization for one step and make a stateful update to the following:
@@ -449,4 +536,4 @@ if __name__ == "__main__":
             train_acc = metrics_history['train_accuracy'][-1]
             test_loss = metrics_history['test_loss'][-1]
             test_acc = metrics_history['test_accuracy'][-1] 
-            print(f"Step {step} LR: {learning_rate:.3e}, train loss: {train_loss:.3f}, acc: {train_acc:.3f}, test loss: {test_loss:.3f}, acc: {test_acc:.3f}")
+            print(f"Step {step} LR: {optimizer.learning_rate:.4e}, train loss: {train_loss:.4f}, acc: {train_acc:.4f}, test loss: {test_loss:.4f}, acc: {test_acc:.4f}")

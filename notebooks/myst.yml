@@ -1,0 +1,30 @@
+version: 1
+project:
+  title: Simple Spatial Agent
+  github: https://github.com/hypernicon/tree-world
+  id: 7b505daf-76d8-479d-acf0-fa474336dd15
+
+  thebe:
+    binder:
+      url: https://mybinder.org/
+      provider: github
+      repo: https://github.com/hypernicon/tree-world
+      ref: HEAD
+  toc:
+    - file: intro.md
+    - file: simulation-dev.ipynb
+    - file: map_testing.ipynb
+    - file: belief-maps.ipynb
+    - file: localizing-with-tem.ipynb
+    - file: drive-based-controller.ipynb
+    - file: rl-local-map.ipynb
+    - file: improving-sensory-perception.ipynb
+
+site:
+  template: book-theme
+  options:
+    baseurl: /tree-world
+    hide_made_with_myst: true
+    style: _static/custom.css
+    favicon: _static/ajl_icon.png
+    logo: _static/ajl_logo.png
