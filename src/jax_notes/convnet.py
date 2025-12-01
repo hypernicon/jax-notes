@@ -205,16 +205,18 @@ class ResNet(flax.nnx.Module):
             for i, num_conv_blocks in enumerate(block_sizes)
         ])
 
-        self.global_avg_pool = flax.nnx.GlobalAveragePool()
-        self.fc = flax.nnx.Linear(start_channels * 2**len(block_sizes), num_classes, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO)
+        self.output_channels = start_channels * 2**len(block_sizes)
+
+        self.fc = flax.nnx.Linear(self.output_channels, num_classes, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO)
 
     def __call__(self, x, *, rngs):
+        x = x.reshape(x.shape[0], self.image_height, self.image_width, self.image_channels)
         x = self.initial_conv(x)
         x = self.initial_bnorm(x)
         x = self.initial_dropout(x, rngs=rngs)
 
         x = self.blocks(x, rngs=rngs)
-        x = self.global_avg_pool(x)
+        x = x.reshape(x.shape[0], -1, self.output_channels).mean(axis=1)
         x = self.fc(x)
         return x
 
