@@ -30,8 +30,8 @@ jobs:
           echo "workspace: $GITHUB_WORKSPACE"
           pwd
           ls -la
-          echo "Try listing notebook/:"
-          ls -la notebook || true
+          echo "Try listing notebooks/:"
+          ls -la notebooks || true
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -45,7 +45,7 @@ jobs:
 
       # Build the site from the subfolder
       - name: Build site
-        working-directory: notebook
+        working-directory: notebooks
         env:
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
@@ -54,25 +54,25 @@ jobs:
 
       # Debug: show where the build actually went
       - name: Show build output
-        working-directory: notebook
+        working-directory: notebooks
         run: |
           echo "PWD=$(pwd)"
-          echo "Tree under notebook/:"
+          echo "Tree under notebooks/:"
           ls -la
-          echo "Tree under notebook/_build:"
+          echo "Tree under notebooks/_build:"
           ls -la _build || true
-          echo "Tree under notebook/_build/html:"
+          echo "Tree under notebooks/_build/html:"
           ls -la _build/html || true
-          echo "Tree under notebook/_build/site:"
+          echo "Tree under notebooks/_build/site:"
           ls -la _build/site || true
-          echo "Tree under notebook/_build/site/public:"
+          echo "Tree under notebooks/_build/site/public:"
           ls -la _build/site/public || true
 
       # Upload the correct folder. If your MyST writes to _build/site, change the path below.
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: notebook/_build/html
+          path: notebooks/_build/html
 
       - name: Deploy to GitHub Pages
         id: deployment
