@@ -396,9 +396,10 @@ def flax_convent_loss(conv_net, rngs, batch):
 FLAX_PASS_MODEL_TO_OPTIMIZER = tuple([int(x) for x in flax.__version__.split(".")[:2]]) >= (0, 11)
 
 @flax.nnx.jit
-def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch):
+def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch, key):
     """Train for a single step."""
     images, labels = batch
+    key, images = augment(key, images)
     grad_fn = flax.nnx.value_and_grad(flax_convent_loss, has_aux=True)
     (loss, logits), grads = grad_fn(conv_net, rngs, batch)
     metrics.update(loss=loss, logits=logits, labels=labels)  # In-place updates.
@@ -499,14 +500,13 @@ if __name__ == "__main__":
     for step in range(train_steps):
         key, key_subsample = jax.random.split(key)
         indices = jax.random.randint(key_subsample, (batch_size,), 0, train_images.shape[0])
-        key, images = augment(key, train_images[indices])
-        batch = (images, train_labels[indices])
+        batch = (train_images[indices], train_labels[indices])
         # Run the optimization for one step and make a stateful update to the following:
         # - The train state's model parameters
         # - The optimizer state
         # - The training loss and accuracy batch metrics
         conv_net.train() # Switch to train mode
-        flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch)
+        flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch, key)
 
         if step > 0 and (step % eval_every == 0 or step == train_steps - 1):  # One training epoch has passed.
             # Log the training metrics.
