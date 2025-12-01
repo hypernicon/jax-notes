@@ -537,5 +537,5 @@ if __name__ == "__main__":
             train_acc = metrics_history['train_accuracy'][-1]
             test_loss = metrics_history['test_loss'][-1]
             test_acc = metrics_history['test_accuracy'][-1] 
-            lr = schedule(optimizer.state.count)
+            lr = schedule(optimizer.step.value)
             print(f"Step {step} LR: {lr:.4e}, train loss: {train_loss:.4f}, acc: {train_acc:.4f}, test loss: {test_loss:.4f}, acc: {test_acc:.4f}")
