@@ -336,7 +336,7 @@ def flax_train_step_conv_net(conv_net, optimizer, metrics, rngs, batch):
     grad_fn = flax.nnx.value_and_grad(flax_convent_loss, has_aux=True)
     (loss, logits), grads = grad_fn(conv_net, rngs, batch)
     metrics.update(loss=loss, logits=logits, labels=labels)  # In-place updates.
-    optimizer.update(conv_net, grads)  # In-place updates.
+    optimizer.update(grads)  # In-place updates.
 
 
 @flax.nnx.jit
