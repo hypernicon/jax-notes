@@ -12,10 +12,17 @@ import flax.nnx
 import optax
 
 
+KAIMING = flax.nnx.initializers.kaiming_normal()  # aka He normal
+BIAS_ZERO = flax.nnx.initializers.zeros
+
+
 class ConvSubblock(flax.nnx.Module):
     def __init__(self, rngs, channels_in, channels_out,
                 kernel_size=3, pool_stride=2, num_conv_layers=1, dropout_rate=0.2):
-        self.conv = flax.nnx.Conv(channels_in, channels_out, (kernel_size, kernel_size), rngs=rngs, padding="SAME")
+        self.conv = flax.nnx.Conv(
+            channels_in, channels_out, (kernel_size, kernel_size), rngs=rngs, padding="SAME", 
+            kernel_init=KAIMING, bias_init=BIAS_ZERO
+        )
         self.bnorm = flax.nnx.BatchNorm(channels_out, rngs=rngs)
         self.dropout = flax.nnx.Dropout(dropout_rate)
 
@@ -58,8 +65,12 @@ class ConvLayer(flax.nnx.Module):
 
 class MLP(flax.nnx.Module):
     def __init__(self, rngs, input_dim, hidden_dim, num_classes, dropout_rate=0.2):
-        self.fc1 = flax.nnx.Linear(input_dim, hidden_dim, rngs=rngs)
-        self.fc2 = flax.nnx.Linear(hidden_dim, 10, rngs=rngs)
+        self.fc1 = flax.nnx.Linear(
+            input_dim, hidden_dim, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO
+        )
+        self.fc2 = flax.nnx.Linear(
+            hidden_dim, 10, rngs=rngs, kernel_init=KAIMING, bias_init=BIAS_ZERO
+        )
         self.bnorm = flax.nnx.BatchNorm(hidden_dim, rngs=rngs)
         self.dropout = flax.nnx.Dropout(dropout_rate)
     
